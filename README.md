@@ -23,7 +23,14 @@ Court detections raw:
 Court detections with temporal smoothing:
 
 ## Team Assignment
-Team assignment with unsupervised learning.
+ByteTrack team assignment:
+
+https://github.com/user-attachments/assets/0a49c28a-7959-4bb4-9947-7b3f92eaf070
+
+SAM 2 team assignment:
+
+https://github.com/user-attachments/assets/c04c2fb0-5554-4182-a3c9-51f8d715eb06
+
 
 ## Pipeline
 Full end-to-end pipeline for
