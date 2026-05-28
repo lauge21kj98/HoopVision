@@ -18,9 +18,9 @@ IDs are shown as unique color.
 https://github.com/user-attachments/assets/b95ac741-2f61-43d8-a444-b9f11732ff6a
 
 ## Court Detection
-Court detections raw:
+Court Detections (Raw detections vs Smoothing)
 
-Court detections with temporal smoothing:
+https://github.com/user-attachments/assets/ac86f125-1622-4490-9b65-d2f874cc5c40
 
 ## Team Assignment
 ByteTrack team assignment:
