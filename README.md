@@ -20,7 +20,7 @@ https://github.com/user-attachments/assets/b95ac741-2f61-43d8-a444-b9f11732ff6a
 ## Court Detection
 Court Detections (Raw detections vs Smoothing)
 
-https://github.com/user-attachments/assets/ac86f125-1622-4490-9b65-d2f874cc5c40
+https://github.com/user-attachments/assets/9160912e-7a48-4099-ae71-89340d8fd7b8
 
 ## Team Assignment
 ByteTrack team assignment:
