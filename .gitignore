@@ -1,0 +1,26 @@
+
+# ---- Android ----
+# Assets
+android/app/src/main/assets/
+
+# Gradle
+.gradle/
+build/
+
+# Local config
+local.properties
+
+# Android Studio
+.idea/
+*.iml
+
+# macOS
+.DS_Store
+
+# Generated
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Checksums / caches
+*.checksum
