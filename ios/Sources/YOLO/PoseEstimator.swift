@@ -1,0 +1,282 @@
+// Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
+//  This file is part of the Ultralytics YOLO Package, implementing human pose estimation functionality.
+//  Licensed under AGPL-3.0. For commercial use, refer to Ultralytics licensing: https://ultralytics.com/license
+//  Access the source code: https://github.com/ultralytics/yolo-ios-app
+//
+//  The PoseEstimator class extends the BasePredictor to provide human pose and keypoint detection.
+//  It processes model outputs to identify human subjects and their body keypoints (joints such as
+//  eyes, shoulders, elbows, wrists, hips, knees, ankles, etc.). The class converts the model's raw
+//  output into structured data representing each detected person's bounding box and associated
+//  keypoints with their confidence scores. This implementation supports both real-time processing
+//  for camera feeds and single image analysis, producing visualizable results that can be overlaid
+//  on the source image to show the detected pose skeleton.
+
+import Accelerate
+import CoreML
+import Foundation
+import UIKit
+import Vision
+
+/// Specialized predictor for YOLO pose estimation models that identify human body keypoints.
+public final class PoseEstimator: BasePredictor, @unchecked Sendable {
+
+  override func processObservations(for request: VNRequest, _ error: Error?) {
+    if let results = request.results as? [VNCoreMLFeatureValueObservation] {
+
+      if let prediction = results.first?.featureValue.multiArrayValue {
+
+        let preds = PostProcessPose(
+          prediction: prediction, confidenceThreshold: Float(self.confidenceThreshold),
+          iouThreshold: Float(self.iouThreshold))
+        var keypointsList = [Keypoints]()
+        var boxes = [Box]()
+
+        let limitedPreds = preds.prefix(self.numItemsThreshold)
+        for person in limitedPreds {
+          boxes.append(person.box)
+          keypointsList.append(person.keypoints)
+        }
+        self.updateTime()
+        let result = YOLOResult(
+          orig_shape: inputSize, boxes: boxes, masks: nil, probs: nil, keypointsList: keypointsList,
+          annotatedImage: nil, speed: self.t2, fps: 1 / self.t4, names: labels)
+        self.currentOnResultsListener?.on(result: result)
+      }
+    }
+  }
+
+  public override func predictOnImage(image: CIImage) -> YOLOResult {
+    let requestHandler = VNImageRequestHandler(ciImage: image, options: [:])
+    guard let request = visionRequest else {
+      let emptyResult = YOLOResult(orig_shape: inputSize, boxes: [], speed: 0, names: labels)
+      return emptyResult
+    }
+
+    let imageWidth = image.extent.width
+    let imageHeight = image.extent.height
+    self.inputSize = CGSize(width: imageWidth, height: imageHeight)
+
+    do {
+      try requestHandler.perform([request])
+
+      if let results = request.results as? [VNCoreMLFeatureValueObservation] {
+
+        if let prediction = results.first?.featureValue.multiArrayValue {
+
+          let preds = PostProcessPose(
+            prediction: prediction, confidenceThreshold: Float(self.confidenceThreshold),
+            iouThreshold: Float(self.iouThreshold))
+          var keypointsList = [Keypoints]()
+          var boxes = [Box]()
+          var keypointsForImage = [[(x: Float, y: Float)]]()
+          var confsList: [[Float]] = []
+
+          let limitedPreds = preds.prefix(self.numItemsThreshold)
+          for person in limitedPreds {
+            boxes.append(person.box)
+            keypointsList.append(person.keypoints)
+            keypointsForImage.append(person.keypoints.xyn)
+            confsList.append(person.keypoints.conf)
+          }
+
+          let annotatedImage = drawYOLOPoseWithBoxes(
+            ciImage: image,
+            keypointsList: keypointsForImage,
+            confsList: confsList,
+            boundingBoxes: boxes
+          )
+
+          updateTime()
+          let result = YOLOResult(
+            orig_shape: inputSize, boxes: boxes, masks: nil, probs: nil,
+            keypointsList: keypointsList, annotatedImage: annotatedImage, speed: self.t2,
+            fps: 1 / self.t4, names: labels)
+          return result
+        }
+      }
+    } catch {
+      YOLOLog.error("Pose estimation failed: \(error)")
+    }
+    return YOLOResult(orig_shape: inputSize, boxes: [], speed: 0, names: labels)
+  }
+
+  func PostProcessPose(
+    prediction: MLMultiArray,
+    confidenceThreshold: Float,
+    iouThreshold: Float
+  )
+    -> [(box: Box, keypoints: Keypoints)]
+  {
+    let shape = prediction.shape.map { $0.intValue }
+    guard shape.count == 3 else { return [] }
+
+    // YOLO26 end2end pose: [1, max_det, 6+51] where shape[2] < shape[1]
+    // Traditional pose: [1, 56, num_anchors] where shape[2] > shape[1]
+    if shape[2] < shape[1] {
+      return postProcessEnd2EndPose(
+        prediction: prediction, shape: shape, confidenceThreshold: confidenceThreshold)
+    }
+
+    let numAnchors = shape[2]
+    let featureCount = shape[1] - 5
+
+    // Wrapper for thread-safe collections
+    final class CollectionsWrapper: @unchecked Sendable {
+      private let lock = NSLock()
+      private(set) var boxes: [CGRect] = []
+      private(set) var scores: [Float] = []
+      private(set) var features: [[Float]] = []
+
+      func append(box: CGRect, score: Float, feature: [Float]) {
+        lock.lock()
+        boxes.append(box)
+        scores.append(score)
+        features.append(feature)
+        lock.unlock()
+      }
+    }
+
+    // Wrapper to make pointer Sendable
+    struct PointerWrapper: @unchecked Sendable {
+      let pointer: UnsafeMutablePointer<Float>
+    }
+
+    let featurePointer = UnsafeMutablePointer<Float>(OpaquePointer(prediction.dataPointer))
+    let pointerWrapper = PointerWrapper(pointer: featurePointer)
+    let collectionsWrapper = CollectionsWrapper()
+
+    DispatchQueue.concurrentPerform(iterations: numAnchors) { j in
+      let confidence = pointerWrapper.pointer[4 * numAnchors + j]
+      guard confidence > confidenceThreshold else { return }
+
+      let x = pointerWrapper.pointer[j]
+      let y = pointerWrapper.pointer[numAnchors + j]
+      let width = pointerWrapper.pointer[2 * numAnchors + j]
+      let height = pointerWrapper.pointer[3 * numAnchors + j]
+
+      let boundingBox = CGRect(
+        x: CGFloat(x - width / 2),
+        y: CGFloat(y - height / 2),
+        width: CGFloat(width),
+        height: CGFloat(height))
+
+      var boxFeatures = [Float](repeating: 0, count: featureCount)
+      for k in 0..<featureCount {
+        boxFeatures[k] = pointerWrapper.pointer[(5 + k) * numAnchors + j]
+      }
+
+      collectionsWrapper.append(box: boundingBox, score: confidence, feature: boxFeatures)
+    }
+
+    let boxes = collectionsWrapper.boxes
+    let scores = collectionsWrapper.scores
+    let features = collectionsWrapper.features
+
+    let selectedIndices = nonMaxSuppression(boxes: boxes, scores: scores, threshold: iouThreshold)
+
+    let filteredBoxes = selectedIndices.map { boxes[$0] }
+    let filteredScores = selectedIndices.map { scores[$0] }
+    let filteredFeatures = selectedIndices.map { features[$0] }
+
+    let boxScorePairs = zip(filteredBoxes, filteredScores)
+    let results: [(Box, Keypoints)] = zip(boxScorePairs, filteredFeatures).map {
+      (pair, boxFeatures) in
+      let (box, score) = pair
+      let imageSizeBox = inputRect(fromModelRect: box)
+      let normalizedBox = normalizedRect(fromInputRect: imageSizeBox)
+      let boxResult = Box(
+        index: 0, cls: "person", conf: score, xywh: imageSizeBox, xywhn: normalizedBox)
+      let numKeypoints = boxFeatures.count / 3
+
+      var xynArray = [(x: Float, y: Float)]()
+      var xyArray = [(x: Float, y: Float)]()
+      var confArray = [Float]()
+
+      for i in 0..<numKeypoints {
+        let kx = boxFeatures[3 * i]
+        let ky = boxFeatures[3 * i + 1]
+        let kc = boxFeatures[3 * i + 2]
+
+        let imagePoint = inputPoint(fromModelPoint: CGPoint(x: CGFloat(kx), y: CGFloat(ky)))
+        let pointNorm = normalizedPoint(fromInputPoint: imagePoint)
+        xynArray.append((x: Float(pointNorm.x), y: Float(pointNorm.y)))
+        xyArray.append((x: Float(imagePoint.x), y: Float(imagePoint.y)))
+
+        confArray.append(kc)
+      }
+
+      let keypoints = Keypoints(xyn: xynArray, xy: xyArray, conf: confArray)
+      return (boxResult, keypoints)
+    }
+
+    return results
+  }
+
+  /// Processes YOLO26 end2end pose output: [1, max_det, 6+51].
+  /// Each detection: [x1, y1, x2, y2, conf, class_id, kp0_x, kp0_y, kp0_conf, ...] in xyxy pixel coords.
+  /// NMS is already applied by the model.
+  private func postProcessEnd2EndPose(
+    prediction: MLMultiArray,
+    shape: [Int],
+    confidenceThreshold: Float
+  ) -> [(box: Box, keypoints: Keypoints)] {
+    let numDetections = shape[1]
+    let numFields = shape[2]
+    let strides = prediction.strides.map { $0.intValue }
+    let pointer = prediction.dataPointer.assumingMemoryBound(to: Float.self)
+    let detStride = strides[1]
+    let fieldStride = strides[2]
+
+    // Determine keypoint start field: check if class_id field is present
+    let kpStartField: Int
+    if (numFields - 6) % 3 == 0 {
+      kpStartField = 6  // [x1, y1, x2, y2, conf, class_id, kp...]
+    } else {
+      kpStartField = 5  // [x1, y1, x2, y2, conf, kp...]
+    }
+    let numKeypoints = (numFields - kpStartField) / 3
+
+    var results: [(box: Box, keypoints: Keypoints)] = []
+
+    for i in 0..<numDetections {
+      let base = i * detStride
+      let conf = pointer[base + 4 * fieldStride]
+      guard conf > confidenceThreshold else { continue }
+
+      let x1 = CGFloat(pointer[base])
+      let y1 = CGFloat(pointer[base + fieldStride])
+      let x2 = CGFloat(pointer[base + 2 * fieldStride])
+      let y2 = CGFloat(pointer[base + 3 * fieldStride])
+
+      let imageSizeBox = inputRect(
+        fromModelRect: CGRect(x: x1, y: y1, width: x2 - x1, height: y2 - y1))
+      let normalizedBox = normalizedRect(fromInputRect: imageSizeBox)
+      let boxResult = Box(
+        index: 0, cls: "person", conf: conf, xywh: imageSizeBox, xywhn: normalizedBox)
+
+      // Extract keypoints
+      var xynArray = [(x: Float, y: Float)]()
+      var xyArray = [(x: Float, y: Float)]()
+      var confArray = [Float]()
+
+      for k in 0..<numKeypoints {
+        let kx = pointer[base + (kpStartField + 3 * k) * fieldStride]
+        let ky = pointer[base + (kpStartField + 3 * k + 1) * fieldStride]
+        let kc = pointer[base + (kpStartField + 3 * k + 2) * fieldStride]
+
+        let imagePoint = inputPoint(fromModelPoint: CGPoint(x: CGFloat(kx), y: CGFloat(ky)))
+        let pointNorm = normalizedPoint(fromInputPoint: imagePoint)
+        xynArray.append((x: Float(pointNorm.x), y: Float(pointNorm.y)))
+        xyArray.append((x: Float(imagePoint.x), y: Float(imagePoint.y)))
+
+        confArray.append(kc)
+      }
+
+      let keypoints = Keypoints(xyn: xynArray, xy: xyArray, conf: confArray)
+      results.append((boxResult, keypoints))
+    }
+
+    return results
+  }
+}
