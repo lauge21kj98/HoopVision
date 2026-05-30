@@ -1,6 +1,5 @@
 # HoopVision
-
-https://github.com/user-attachments/assets/5e135c05-0dc7-463e-88a3-29c716be1c28
+This repository contains the code and notebooks used for my Master's thesis. It is intended to make the experiments and results reproducible: you can train detection and pose models, export and profile models for mobile deployment, and run the full inference pipeline used in the thesis on either Android or iOS.
 
 ## Getting Started
 
@@ -43,6 +42,10 @@ Open `ios/ExampleApps/YOLORealTimeSwiftUI/` in Xcode and sign project with your 
 Link: https://github.com/ultralytics/yolo-ios-app/tree/main
 
 # Videos
+Pipeline for shot detection. Shots are marked as made or missed on minimap in real-time.
+
+https://github.com/user-attachments/assets/5e135c05-0dc7-463e-88a3-29c716be1c28
+
 ## Detections
 Basketball object detection:
 
