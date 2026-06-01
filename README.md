@@ -11,6 +11,7 @@ The `notebooks/` directory contains Jupyter notebooks for training and running m
 - **Pose Estimation Model**: Train or run a pose estimation model for player keypoint detection
 - **Export Models**: Upload models to Qualcomm AI Hub and export to .tflite, profile, quantize to int8. Furthermore, export for iOS apps.
 - **Track and Detect**: Run models for basketball track and detection pipeline.
+- **Shot Detection**: Specific notebook for running object detection, court detection, and shot detection.
 
 All notebooks are designed to run in Google Colab with GPU support for fast model training and inference.
 
